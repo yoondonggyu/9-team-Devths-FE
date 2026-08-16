@@ -1,0 +1,119 @@
+name: AWS 배포 (ECR + SSM)
+
+on:
+  push:
+    branches: [aws]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-northeast-2
+  ECR_REPOSITORY: devths-fe
+  ROLE_ARN: arn:aws:iam::717559668391:role/devths-github-actions-deploy
+  # BE와 달리 NEXT_PUBLIC_* 값들은 브라우저 번들에 그대로 노출되는 값이라
+  # 애초에 시크릿이 아님(Firebase Web API Key/Sentry DSN 등은 공개 전제로 설계된 값들) —
+  # Secrets Manager를 쓸 이유가 없어 여기 직접 둔다.
+  NEXT_PUBLIC_API_BASE_URL: http://devths-alb-515899108.ap-northeast-2.elb.amazonaws.com/api
+  NEXT_PUBLIC_S3_URL: https://devths-dev.s3.ap-northeast-2.amazonaws.com
+  NEXT_PUBLIC_GOOGLE_CLIENT_ID: 501247169001-35fhspm7dhs5mec2gddoj6a0eqm1qojr.apps.googleusercontent.com
+  # 도메인이 아직 없어 실제 OAuth 콜백은 동작 안 함(placeholder) — 도메인 확보 후 교체 필요
+  NEXT_PUBLIC_GOOGLE_REDIRECT_URI: http://localhost:3000/oauth/callback
+  NEXT_PUBLIC_SENTRY_DSN: https://d4f35e827f4cc2f65fabad313840be15@o4510883333144576.ingest.us.sentry.io/4510883360538624
+  NEXT_PUBLIC_SENTRY_ORG: devths
+  NEXT_PUBLIC_SENTRY_PROJECT: javascript-nextjs
+  NEXT_PUBLIC_SENTRY_ENVIRONMENT: aws
+  # Firebase 클라이언트 SDK(FCM 웹 푸시)용 — 실제 콘솔 값 미확보, placeholder로 부팅만 통과
+  # (컴포넌트가 클릭 시점에만 값을 읽어 지연 평가하므로 크래시 위험 없음, 기능만 비활성)
+  NEXT_PUBLIC_FIREBASE_API_KEY: placeholder-firebase-api-key
+  NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: devths-f2222.firebaseapp.com
+  NEXT_PUBLIC_FIREBASE_PROJECT_ID: devths-f2222
+  NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET: devths-f2222.appspot.com
+  NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: "000000000000"
+  NEXT_PUBLIC_FIREBASE_APP_ID: "1:000000000000:web:placeholder"
+  NEXT_PUBLIC_FIREBASE_VAPID_KEY: placeholder-vapid-key
+  NEXT_PUBLIC_GA_MEASUREMENT_ID: ""
+  NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION: ""
+  NEXT_PUBLIC_NAVER_SITE_VERIFICATION: ""
+
+jobs:
+  build-and-push:
+    name: 빌드 및 ECR push
+    runs-on: ubuntu-latest
+    outputs:
+      image_uri: ${{ steps.build.outputs.image_uri }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Next.js는 빌드 시점에 NEXT_PUBLIC_* 값을 브라우저 번들에 그대로 박아 넣는다(런타임 주입 불가) —
+      # Dockerfile 주석에 이미 "Next.js가 자동으로 .env.production 파일을 읽음"이라고 되어 있어
+      # 그 메커니즘을 그대로 이용(Dockerfile 수정 불필요, COPY . . 가 이 파일을 그대로 포함시킴)
+      - name: .env.production 생성
+        run: |
+          cat > .env.production <<EOF
+          NEXT_PUBLIC_API_BASE_URL=${{ env.NEXT_PUBLIC_API_BASE_URL }}
+          NEXT_PUBLIC_S3_URL=${{ env.NEXT_PUBLIC_S3_URL }}
+          NEXT_PUBLIC_GOOGLE_CLIENT_ID=${{ env.NEXT_PUBLIC_GOOGLE_CLIENT_ID }}
+          NEXT_PUBLIC_GOOGLE_REDIRECT_URI=${{ env.NEXT_PUBLIC_GOOGLE_REDIRECT_URI }}
+          NEXT_PUBLIC_SENTRY_DSN=${{ env.NEXT_PUBLIC_SENTRY_DSN }}
+          NEXT_PUBLIC_SENTRY_ORG=${{ env.NEXT_PUBLIC_SENTRY_ORG }}
+          NEXT_PUBLIC_SENTRY_PROJECT=${{ env.NEXT_PUBLIC_SENTRY_PROJECT }}
+          NEXT_PUBLIC_SENTRY_ENVIRONMENT=${{ env.NEXT_PUBLIC_SENTRY_ENVIRONMENT }}
+          NEXT_PUBLIC_FIREBASE_API_KEY=${{ env.NEXT_PUBLIC_FIREBASE_API_KEY }}
+          NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=${{ env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN }}
+          NEXT_PUBLIC_FIREBASE_PROJECT_ID=${{ env.NEXT_PUBLIC_FIREBASE_PROJECT_ID }}
+          NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=${{ env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET }}
+          NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=${{ env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID }}
+          NEXT_PUBLIC_FIREBASE_APP_ID=${{ env.NEXT_PUBLIC_FIREBASE_APP_ID }}
+          NEXT_PUBLIC_FIREBASE_VAPID_KEY=${{ env.NEXT_PUBLIC_FIREBASE_VAPID_KEY }}
+          NEXT_PUBLIC_GA_MEASUREMENT_ID=${{ env.NEXT_PUBLIC_GA_MEASUREMENT_ID }}
+          NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION=${{ env.NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION }}
+          NEXT_PUBLIC_NAVER_SITE_VERIFICATION=${{ env.NEXT_PUBLIC_NAVER_SITE_VERIFICATION }}
+          EOF
+
+      - name: Build & push image
+        id: build
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          set -euo pipefail
+          IMAGE_TAG="aws-$(git rev-parse --short HEAD)"
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker build -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+          echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
+  deploy-fe:
+    name: fe 배포
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to fe
+        run: |
+          chmod +x .github/scripts/ssm-deploy.sh
+          .github/scripts/ssm-deploy.sh \
+            devths-fe \
+            "${{ needs.build-and-push.outputs.image_uri }}" \
+            3000 \
+            / \
+            devths-fe \
+            "-e NEXT_PUBLIC_API_BASE_URL=${{ env.NEXT_PUBLIC_API_BASE_URL }}"
