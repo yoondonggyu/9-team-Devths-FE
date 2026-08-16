@@ -106,14 +106,20 @@ COMMAND_ID=$(aws ssm send-command \
 echo "SSM Command ID: $COMMAND_ID"
 sleep 3
 
-while true; do
+# SSM 커맨드 자체의 --timeout-seconds가 있어도, 인스턴스가 부하로 SSM 에이전트 응답을
+# 잃어버리면(t3.micro가 CPU 크레딧 소진으로 실제로 이런 상태에 빠진 적 있음) 커맨드가
+# 종결 상태로 안 넘어가고 InProgress에 무한정 머무를 수 있다 — 로컬 폴링 루프에도
+# 반드시 자체 상한을 둬서, SSM 쪽이 멈춰도 워크플로우 자체는 반드시 끝나게 한다.
+MAX_POLLS=70 # 70 * 5s ≈ 350초, SSM 자체 타임아웃(300초)보다 여유 있게
+for ((i = 1; i <= MAX_POLLS; i++)); do
   STATUS=$(aws ssm get-command-invocation \
     --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
     --query "Status" --output text 2>/dev/null || echo "Pending")
-  echo "상태: $STATUS"
+  echo "상태: $STATUS ($i/$MAX_POLLS)"
   case "$STATUS" in
     Success)
-      break
+      echo "배포 성공: $INSTANCE_NAME"
+      exit 0
       ;;
     Failed | Cancelled | TimedOut)
       echo "── stdout ──"
@@ -128,4 +134,6 @@ while true; do
   sleep 5
 done
 
-echo "배포 성공: $INSTANCE_NAME"
+echo "SSM 커맨드가 ${MAX_POLLS} 회 폴링 동안 종결 상태에 도달하지 못함 — 인스턴스가 응답 불능일 가능성. 로컬에서 강제 종료."
+aws ssm cancel-command --command-id "$COMMAND_ID" --instance-ids "$INSTANCE_ID" 2>/dev/null || true
+exit 1
