@@ -24,6 +24,7 @@ jobs:
             --context=dir:///workspace \
             --dockerfile=/workspace/Dockerfile \
             --destination=harbor.devths.local/devths-fe/fe:${{ steps.vars.outputs.sha_short }} \
+            --custom-platform=linux/amd64 \
             --skip-tls-verify
 
       - name: Update GitOps manifest tag
