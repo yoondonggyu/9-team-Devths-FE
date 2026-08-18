@@ -1,4 +1,4 @@
-name: K8s CI/CD (Kaniko + Harbor + GitOps)
+name: K8s CI/CD (Kaniko on Mac mini + Harbor + GitOps)
 
 on:
   push:
@@ -6,97 +6,34 @@ on:
 
 jobs:
   build-and-deploy:
-    runs-on: [self-hosted, k8s, fe]
+    runs-on: [self-hosted, macmini, fe]
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Compute short SHA
         id: vars
         run: echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
-      - name: Ensure kubectl is available
+      - name: Build and push with Kaniko
         run: |
-          if ! command -v kubectl >/dev/null 2>&1; then
-            curl -fsSLO "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-            chmod +x kubectl
-            mkdir -p "$HOME/bin" && mv kubectl "$HOME/bin/kubectl"
-            echo "$HOME/bin" >> "$GITHUB_PATH"
-          fi
-
-      - name: Render and apply Kaniko build Job
-        run: |
-          kubectl delete job "kaniko-fe-${{ steps.vars.outputs.sha_short }}" -n ci --ignore-not-found
-          cat <<EOF | kubectl create -f -
-          apiVersion: batch/v1
-          kind: Job
-          metadata:
-            name: kaniko-fe-${{ steps.vars.outputs.sha_short }}
-            namespace: ci
-            labels: {app: kaniko-build, repo: fe}
-          spec:
-            backoffLimit: 0
-            ttlSecondsAfterFinished: 3600
-            template:
-              spec:
-                restartPolicy: Never
-                initContainers:
-                - name: git-clone
-                  image: alpine/git:latest
-                  env:
-                  - name: GIT_TOKEN
-                    valueFrom:
-                      secretKeyRef: {name: devths-manifests-pat, key: token}
-                  command: ["sh", "-c"]
-                  args:
-                    - |
-                      set -eu
-                      git clone --depth 1 --branch "${{ github.ref_name }}" \
-                        "https://x-access-token:\${GIT_TOKEN}@github.com/yoondonggyu/9-team-Devths-FE.git" /workspace
-                      cd /workspace && git checkout "${{ github.sha }}"
-                  volumeMounts:
-                  - {name: workspace, mountPath: /workspace}
-                  resources:
-                    requests: {cpu: 100m, memory: 128Mi}
-                    limits: {cpu: 300m, memory: 256Mi}
-                containers:
-                - name: kaniko
-                  image: gcr.io/kaniko-project/executor:latest
-                  args:
-                  - --context=dir:///workspace
-                  - --dockerfile=/workspace/Dockerfile
-                  - --destination=harbor-core.harbor.svc.cluster.local/devths-fe/fe:${{ steps.vars.outputs.sha_short }}
-                  - --insecure
-                  - --snapshot-mode=redo
-                  volumeMounts:
-                  - {name: workspace, mountPath: /workspace}
-                  - {name: docker-config, mountPath: /kaniko/.docker}
-                  resources:
-                    requests: {cpu: 500m, memory: 2Gi}
-                    limits: {cpu: 1000m, memory: 3.2Gi}
-                volumes:
-                - {name: workspace, emptyDir: {}}
-                - name: docker-config
-                  secret:
-                    secretName: harbor-devths-fe-push
-                    items: [{key: .dockerconfigjson, path: config.json}]
-          EOF
-
-      - name: Wait for build to finish
-        run: |
-          if ! kubectl wait --for=condition=complete "job/kaniko-fe-${{ steps.vars.outputs.sha_short }}" -n ci --timeout=600s; then
-            echo "::error::Kaniko build failed, dumping logs"
-            POD=$(kubectl get pods -n ci -l job-name="kaniko-fe-${{ steps.vars.outputs.sha_short }}" -o jsonpath='{.items[0].metadata.name}')
-            kubectl logs -n ci "$POD" -c git-clone || true
-            kubectl logs -n ci "$POD" -c kaniko || true
-            exit 1
-          fi
+          docker run --rm \
+            -v "${{ github.workspace }}:/workspace" \
+            -v "$HOME/ci-secrets/harbor-fe:/kaniko/.docker" \
+            gcr.io/kaniko-project/executor:latest \
+            --context=dir:///workspace \
+            --dockerfile=/workspace/Dockerfile \
+            --destination=harbor.devths.local/devths-fe/fe:${{ steps.vars.outputs.sha_short }} \
+            --skip-tls-verify
 
       - name: Update GitOps manifest tag
         run: |
           git config --global user.email "ci@devths.local"
           git config --global user.name "devths-ci-bot"
-          MANIFESTS_TOKEN=$(cat /etc/ci-secrets/manifests-token/token)
+          MANIFESTS_TOKEN=$(cat "$HOME/ci-secrets/manifests-token")
           rm -rf /tmp/devths-k8s-manifests
           git clone "https://x-access-token:${MANIFESTS_TOKEN}@github.com/yoondonggyu/devths-k8s-manifests.git" /tmp/devths-k8s-manifests
           cd /tmp/devths-k8s-manifests
-          sed -i "s#harbor.devths.local/devths-fe/fe:.*#harbor.devths.local/devths-fe/fe:${{ steps.vars.outputs.sha_short }}#" apps/fe/deployment.yaml
+          sed -i '' "s#harbor.devths.local/devths-fe/fe:.*#harbor.devths.local/devths-fe/fe:${{ steps.vars.outputs.sha_short }}#" apps/fe/deployment.yaml
           git commit -am "fe: deploy ${{ steps.vars.outputs.sha_short }}"
           git push
