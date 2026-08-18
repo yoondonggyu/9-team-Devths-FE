@@ -37,6 +37,10 @@ jobs:
             template:
               spec:
                 restartPolicy: Never
+                tolerations:
+                - key: node-role.kubernetes.io/control-plane
+                  operator: Exists
+                  effect: NoSchedule
                 initContainers:
                 - name: git-clone
                   image: alpine/git:latest
@@ -64,12 +68,13 @@ jobs:
                   - --dockerfile=/workspace/Dockerfile
                   - --destination=harbor-core.harbor.svc.cluster.local/devths-fe/fe:${{ steps.vars.outputs.sha_short }}
                   - --insecure
+                  - --snapshot-mode=redo
                   volumeMounts:
                   - {name: workspace, mountPath: /workspace}
                   - {name: docker-config, mountPath: /kaniko/.docker}
                   resources:
-                    requests: {cpu: 500m, memory: 1Gi}
-                    limits: {cpu: 1000m, memory: 2Gi}
+                    requests: {cpu: 500m, memory: 1.5Gi}
+                    limits: {cpu: 1000m, memory: 2.5Gi}
                 volumes:
                 - {name: workspace, emptyDir: {}}
                 - name: docker-config
